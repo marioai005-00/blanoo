@@ -116,6 +116,53 @@ class Kitchen:
     def calculate_requirements(self, recipe_id, servings):
         return self.calculate(self.find_recipe(recipe_id), _servings(servings))
 
+    def plan_shopping(self, items):
+        """먹고 싶은 메뉴 여러 개를 합산해 재료별 필요 · 보유 · 부족과 장보기 목록을 만든다.
+        같은 재료는 메뉴 사이에서 합쳐서 한 번에 비교한다(메뉴별 부족량을 단순히 더하지 않는다)."""
+        if not isinstance(items, list) or not items:
+            raise ToolError("items에 먹고 싶은 메뉴를 {recipe_id, servings} 형태로 1개 이상 넣어야 합니다.")
+        dishes, agg = [], {}
+        for it in items:
+            if not isinstance(it, dict):
+                raise ToolError("items의 각 항목은 {recipe_id, servings} 객체여야 합니다.")
+            recipe = self.find_recipe(it.get("recipe_id"))
+            servings = _servings(it.get("servings"))
+            dishes.append({"recipe_id": recipe["레시피ID"], "recipe_name": recipe["이름"], "servings": servings})
+            for ing in recipe["재료"]:
+                a = agg.setdefault(ing["재료ID"], {"ing": ing, "need": Fraction(0), "units": set(), "used_in": []})
+                a["need"] += _frac(ing["수량"]) * servings / recipe["기준인원"]
+                a["units"].add(ing["단위"])
+                if recipe["이름"] not in a["used_in"]:
+                    a["used_in"].append(recipe["이름"])
+        rows, shopping, hold = [], [], []
+        for a in agg.values():
+            ing, unit = a["ing"], a["ing"]["단위"]
+            stock = self.stock_for(ing)
+            row = {"ingredient": ing["이름"], "재료ID": ing["재료ID"], "unit": unit,
+                   "need": _num(a["need"]), "used_in": a["used_in"]}
+            if len(a["units"]) > 1:
+                hold.append(ing["이름"])
+                row.update(have=stock["qty"] if stock else 0, short=None, status="hold",
+                           note="메뉴마다 단위가 달라 합산 보류")
+            elif stock is None:
+                row.update(have=0, short=_num(a["need"]), status="unregistered", note="미등록, 보유 0으로 비교")
+            elif stock["unit"] != unit:
+                hold.append(ing["이름"])
+                row.update(have=stock["qty"], short=None, status="hold", fridge_unit=stock["unit"],
+                           note=f"단위 불일치(냉장고 {stock['unit']} ≠ 레시피 {unit}), 계산 보류")
+            else:
+                short = max(a["need"] - _frac(stock["qty"]), Fraction(0))
+                row.update(have=stock["qty"], short=_num(short), status="short" if short > 0 else "ok", note="")
+            if row["short"]:
+                shopping.append({"ingredient": ing["이름"], "amount": row["short"], "unit": unit})
+            rows.append(row)
+        return {
+            "dishes": dishes, "rows": rows, "shopping_list": shopping,
+            "hold_ingredients": hold, "shopping_confirmed": not hold,
+            "verdict": "부족" if shopping else ("보류" if hold else "가능"),
+            "inventory_changed": False,
+        }
+
     def search_recipes(self, servings, exclude_ingredients=None, only_available=False):
         servings = _servings(servings)
         exclude = {_norm(n) for n in (exclude_ingredients or []) if str(n).strip()}
@@ -188,6 +235,18 @@ TOOLS = [
             "servings": {"type": "integer", "description": "먹는 사람 수(1 이상)"}},
             "required": ["recipe_id", "servings"]},
     },
+    {
+        "name": "plan_shopping",
+        "description": ("사용자가 먹고 싶은 메뉴(1개 이상)를 받아, 같은 재료를 합산한 재료별 필요 · 보유 · 부족과 "
+                        "장보기 목록을 코드로 계산한다. 메뉴가 여러 개일 때는 이 도구로 한 번에 계산한다. 재고는 바뀌지 않는다."),
+        "input_schema": {"type": "object", "properties": {
+            "items": {"type": "array", "description": "먹고 싶은 메뉴 목록", "items": {
+                "type": "object", "properties": {
+                    "recipe_id": {"type": "string", "description": "레시피ID(예: R01). 이름만 알면 이름도 가능."},
+                    "servings": {"type": "integer", "description": "그 메뉴를 먹는 사람 수(1 이상)"}},
+                "required": ["recipe_id", "servings"]}}},
+            "required": ["items"]},
+    },
 ]
 
 
@@ -204,6 +263,8 @@ def run_tool(kitchen: Kitchen, name: str, args: dict):
             return kitchen.get_recipe(args.get("recipe_id"))
         if name == "calculate_requirements":
             return kitchen.calculate_requirements(args.get("recipe_id"), args.get("servings"))
+        if name == "plan_shopping":
+            return kitchen.plan_shopping(args.get("items"))
     except ToolError:
         raise
     except Exception as e:  # 예상 밖 오류도 도구 실패로 다룬다
@@ -235,4 +296,9 @@ def summarize(name: str, result: dict) -> str:
         shop = ", ".join(f"{s['ingredient']} {fmt(s['amount'], s['unit'])}" for s in result["shopping_list"]) or "추가 필요 없음"
         hold = f" / 보류: {', '.join(result['hold_ingredients'])}" if result["hold_ingredients"] else ""
         return f"{result['recipe_name']} {result['servings']}명 — 장보기: {shop}{hold}"
+    if name == "plan_shopping":
+        dishes = ", ".join(f"{d['recipe_name']} {d['servings']}명" for d in result["dishes"])
+        shop = ", ".join(f"{s['ingredient']} {fmt(s['amount'], s['unit'])}" for s in result["shopping_list"]) or "추가 필요 없음"
+        hold = f" / 보류: {', '.join(result['hold_ingredients'])}" if result["hold_ingredients"] else ""
+        return f"{dishes} — 장보기: {shop}{hold}"
     return json.dumps(result, ensure_ascii=False)[:200]

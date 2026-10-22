@@ -125,6 +125,51 @@ def render_calc(c, label, entry_key):
                            key=f"dl_{entry_key}")
 
 
+def render_plan(p, label):
+    dishes = " · ".join(f"{d['recipe_name']} {d['servings']}명" for d in p["dishes"])
+    st.markdown(f"##### {label} — {dishes}")
+    st.table([{"재료": r["ingredient"],
+               "필요(합산)": n(r["need"], r["unit"]),
+               "보유": n(r["have"], r.get("fridge_unit", r["unit"])),
+               "부족": n(r["short"], r["unit"]) if r["short"] is not None else "계산 보류",
+               "쓰이는 메뉴": ", ".join(r["used_in"]),
+               "비고": r["note"]} for r in p["rows"]])
+    if p["shopping_list"]:
+        st.markdown("**장보기 목록:** " + ", ".join(f"{s['ingredient']} {n(s['amount'], s['unit'])}" for s in p["shopping_list"]))
+    elif not p["hold_ingredients"]:
+        st.markdown("**추가로 필요한 재료가 없습니다.** 지금 재료로 모두 만들 수 있습니다.")
+    if p["hold_ingredients"]:
+        st.warning(f"단위가 달라 계산을 보류한 재료: {', '.join(p['hold_ingredients'])}. 장보기 목록을 확정할 수 없습니다.")
+    st.caption("같은 재료는 메뉴 사이에서 합산해 비교했습니다. 현재 재고는 변경되지 않습니다.")
+
+
+def render_cart(src):
+    """사이드바 장보기 목록: 가장 최근 계산(메뉴 계산 또는 장보기 계획)의 부족 재료."""
+    st.sidebar.header("🛒 장보기 목록")
+    if src is None:
+        st.sidebar.caption("메뉴를 정하거나 먹고 싶은 메뉴를 말하면 여기에 장보기 목록이 생깁니다.")
+        return
+    key, result = src
+    if result.get("dishes"):
+        title = " · ".join(f"{d['recipe_name']} {d['servings']}명" for d in result["dishes"])
+    else:
+        title = f"{result['recipe_name']} {result['servings']}명"
+    st.sidebar.caption(title)
+    if result["shopping_list"]:
+        for s in result["shopping_list"]:
+            st.sidebar.checkbox(f"{s['ingredient']} {n(s['amount'], s['unit'])}", key=f"buy_{key}_{s['ingredient']}")
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["재료", "부족량", "단위"])
+        w.writerows([[s["ingredient"], s["amount"], s["unit"]] for s in result["shopping_list"]])
+        st.sidebar.download_button("장보기 목록 CSV", buf.getvalue().encode("utf-8-sig"), "장보기목록.csv",
+                                   "text/csv", key=f"cart_dl_{key}")
+    elif not result["hold_ingredients"]:
+        st.sidebar.success("추가로 필요한 재료가 없습니다.")
+    if result["hold_ingredients"]:
+        st.sidebar.warning(f"계산 보류: {', '.join(result['hold_ingredients'])} (단위 불일치) — 장보기를 확정할 수 없습니다.")
+
+
 def render_candidates(res, entry_key):
     cond = res["conditions"]
     parts = [f"{cond['servings']}명"]
@@ -168,7 +213,7 @@ def render_log(calls, note=""):
             st.markdown(f"**{c.name}** — {mark}{sim}  \n인자: `{json.dumps(c.input, ensure_ascii=False)}`  \n반환 요약: {c.summary}")
 
 
-def render_artifacts(calls, entry_key, latest_key):
+def render_artifacts(calls, entry_key, latest_key, latest_plan_key):
     for ci, c in enumerate(calls):
         if not c.ok or c.result is None:
             continue
@@ -179,6 +224,8 @@ def render_artifacts(calls, entry_key, latest_key):
             render_steps(c.result)
         elif c.name == "calculate_requirements":
             render_calc(c.result, "최신 결과" if k == latest_key else "이전 결과", k)
+        elif c.name == "plan_shopping":
+            render_plan(c.result, "최신 장보기 계획" if k == latest_plan_key else "이전 장보기 계획")
 
 
 # ---------------------------------------------------------------- 화면
@@ -214,11 +261,17 @@ elif retry:
     retry = False
 
 # 가장 마지막 계산 결과를 '최신'으로 표시
-latest_key = None
+latest_key = latest_plan_key = None
+cart_src = None  # 사이드바 장보기 목록의 근거: 가장 최근의 메뉴 계산 또는 장보기 계획
 for ei, e in enumerate(ss.display):
     for ci, c in enumerate(e.get("calls", [])):
-        if c.name == "calculate_requirements" and c.ok:
+        if c.ok and c.name == "calculate_requirements":
             latest_key = f"{ei}_{ci}"
+            cart_src = (latest_key, c.result)
+        elif c.ok and c.name == "plan_shopping":
+            latest_plan_key = f"{ei}_{ci}"
+            cart_src = (latest_plan_key, c.result)
+render_cart(cart_src)
 
 for ei, e in enumerate(ss.display):
     if e["kind"] == "user":
@@ -231,7 +284,7 @@ for ei, e in enumerate(ss.display):
                 failed = [c for c in e["calls"] if not c.ok]
                 if failed:
                     st.warning(f"도구 실패 {len(failed)}건이 있었습니다. 실패한 호출의 결과는 사용하지 않았습니다.")
-                render_artifacts(e["calls"], ei, latest_key)
+                render_artifacts(e["calls"], ei, latest_key, latest_plan_key)
             else:
                 label = {"model": "모델 호출 실패", "timeout": "모델 호출 실패(시간 초과)", "limit": "도구 호출 상한 도달",
                          "auth": "인증 실패"}[e["failure_kind"]]
@@ -243,7 +296,7 @@ for ei, e in enumerate(ss.display):
                     st.rerun()
             render_log(e["calls"], e.get("note", ""))
 
-typed = st.chat_input("예: 두 명이 먹을 저녁 메뉴 추천해줘. 달걀은 빼줘.", disabled=blocked)
+typed = st.chat_input("예: 두 명이 먹을 저녁 메뉴 추천해줘. 달걀은 빼줘. / 김치찌개랑 감자전 먹고 싶어, 두 명이야.", disabled=blocked)
 if typed:
     pending = typed
 

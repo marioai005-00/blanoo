@@ -71,6 +71,29 @@ rice = cal["rows"][0]
 assert rice["status"] == "hold" and rice["short"] is None and not cal["shopping_confirmed"]
 assert rows(cal)["당근"] == (100, 120, 0) and rows(cal)["물"] == (300, 1000, 0)
 
+# 장보기 계획: 여러 메뉴 합산 (김치찌개 2명 + 두부부침 2명 -> 두부 450 필요, 메뉴별로는 못 잡는 부족)
+plan = k.plan_shopping([{"recipe_id": "R05", "servings": 2}, {"recipe_id": "두부부침", "servings": 2}])
+prow = {r["ingredient"]: (r["need"], r["have"], r["short"]) for r in plan["rows"]}
+assert prow["두부"] == (450, 300, 150), prow
+assert prow["돼지고기"] == (150, 0, 150) and prow["식용유"] == (20, 200, 0) and prow["달걀"] == (1, 4, 0), prow
+assert plan["rows"][[r["ingredient"] for r in plan["rows"]].index("두부")]["used_in"] == ["김치찌개", "두부부침"]
+assert sorted((s["ingredient"], s["amount"]) for s in plan["shopping_list"]) == [("돼지고기", 150), ("두부", 150)]
+assert plan["verdict"] == "부족" and plan["shopping_confirmed"] and plan["inventory_changed"] is False
+# 같은 메뉴를 두 번 넣으면 합산, 재고 충분하면 장보기 없음
+dup = k.plan_shopping([{"recipe_id": "R01", "servings": 1}, {"recipe_id": "R01", "servings": 1}])
+assert {r["ingredient"]: r["need"] for r in dup["rows"]}["쌀"] == 200 and dup["shopping_list"] == [{"ingredient": "쌀", "amount": 50, "unit": "g"}]
+ok = k.plan_shopping([{"recipe_id": "R02", "servings": 1}, {"recipe_id": "R03", "servings": 2}])
+assert ok["shopping_list"] == [] and ok["verdict"] == "가능"
+# 단위 불일치 합산 보류
+holdp = tools.Kitchen(f2, recipes).plan_shopping([{"recipe_id": "R01", "servings": 1}, {"recipe_id": "R08", "servings": 1}])
+assert "쌀" in holdp["hold_ingredients"] and not holdp["shopping_confirmed"]
+for bad in ([], None, [{"recipe_id": "R99", "servings": 1}], [{"recipe_id": "R01", "servings": 0}]):
+    try:
+        k.plan_shopping(bad)
+        raise AssertionError(f"장보기 입력 {bad!r} 허용됨")
+    except tools.ToolError:
+        pass
+
 # 인원 검증
 for bad in (0, -1, 1.5, "2"):
     try:
