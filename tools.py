@@ -116,6 +116,24 @@ class Kitchen:
     def calculate_requirements(self, recipe_id, servings):
         return self.calculate(self.find_recipe(recipe_id), _servings(servings))
 
+    @staticmethod
+    def _custom_ingredients(dish, ingredients):
+        """등록되지 않은 메뉴용으로 모델이 추정한 재료 목록을 검사해 레시피 재료 형태로 바꾼다."""
+        if not isinstance(ingredients, list) or not ingredients:
+            raise ToolError(f"'{dish}'는 등록되지 않은 메뉴라 ingredients(재료 이름 · 수량 · 단위 목록)가 필요합니다.")
+        out = []
+        for i in ingredients:
+            name = _norm(str((i or {}).get("name", "")))
+            qty, unit = (i or {}).get("qty"), (i or {}).get("unit")
+            if not name:
+                raise ToolError(f"'{dish}'의 재료에 이름이 없습니다.")
+            if isinstance(qty, bool) or not isinstance(qty, (int, float)) or qty <= 0:
+                raise ToolError(f"'{dish}'의 재료 '{name}' 수량이 0보다 큰 숫자가 아닙니다 (받은 값: {qty!r}).")
+            if unit not in ("g", "개"):
+                raise ToolError(f"'{dish}'의 재료 '{name}' 단위 {unit!r}은(는) g 또는 개가 아닙니다. g 또는 개로 환산해 다시 호출하세요.")
+            out.append({"재료ID": None, "이름": name, "수량": qty, "단위": unit})
+        return out
+
     def plan_shopping(self, items):
         """먹고 싶은 메뉴 여러 개를 합산해 재료별 필요 · 보유 · 부족과 장보기 목록을 만든다.
         같은 재료는 메뉴 사이에서 합쳐서 한 번에 비교한다(메뉴별 부족량을 단순히 더하지 않는다)."""
@@ -124,22 +142,38 @@ class Kitchen:
         dishes, agg = [], {}
         for it in items:
             if not isinstance(it, dict):
-                raise ToolError("items의 각 항목은 {recipe_id, servings} 객체여야 합니다.")
-            recipe = self.find_recipe(it.get("recipe_id"))
+                raise ToolError("items의 각 항목은 객체여야 합니다.")
             servings = _servings(it.get("servings"))
-            dishes.append({"recipe_id": recipe["레시피ID"], "recipe_name": recipe["이름"], "servings": servings})
-            for ing in recipe["재료"]:
-                a = agg.setdefault(ing["재료ID"], {"ing": ing, "need": Fraction(0), "units": set(), "used_in": []})
-                a["need"] += _frac(ing["수량"]) * servings / recipe["기준인원"]
+            custom = str(it.get("custom_name") or "").strip()
+            if bool(custom) == bool(it.get("recipe_id")):
+                raise ToolError("각 항목에는 등록 메뉴면 recipe_id를, 등록되지 않은 메뉴면 custom_name과 ingredients를 "
+                                "(둘 중 하나만) 넣어야 합니다.")
+            if custom:  # 등록되지 않은 메뉴: 모델이 추정한 재료량(요청 인원 전체 분량)을 받아 비교만 코드가 한다
+                ings = self._custom_ingredients(custom, it.get("ingredients"))
+                dishes.append({"recipe_id": None, "recipe_name": custom, "servings": servings, "source": "AI 추정",
+                               "ingredients": [{"name": i["이름"], "qty": i["수량"], "unit": i["단위"]} for i in ings]})
+                parts = [(i, _frac(i["수량"])) for i in ings]
+                label, estimated = custom, True
+            else:
+                recipe = self.find_recipe(it.get("recipe_id"))
+                dishes.append({"recipe_id": recipe["레시피ID"], "recipe_name": recipe["이름"], "servings": servings,
+                               "source": "등록 레시피"})
+                parts = [(i, _frac(i["수량"]) * servings / recipe["기준인원"]) for i in recipe["재료"]]
+                label, estimated = recipe["이름"], False
+            for ing, need in parts:
+                a = agg.setdefault(_norm(ing["이름"]), {"ing": ing, "need": Fraction(0), "units": set(),
+                                                       "used_in": [], "estimated": False})
+                a["need"] += need
                 a["units"].add(ing["단위"])
-                if recipe["이름"] not in a["used_in"]:
-                    a["used_in"].append(recipe["이름"])
+                a["estimated"] = a["estimated"] or estimated
+                if label not in a["used_in"]:
+                    a["used_in"].append(label)
         rows, shopping, hold = [], [], []
         for a in agg.values():
             ing, unit = a["ing"], a["ing"]["단위"]
             stock = self.stock_for(ing)
-            row = {"ingredient": ing["이름"], "재료ID": ing["재료ID"], "unit": unit,
-                   "need": _num(a["need"]), "used_in": a["used_in"]}
+            row = {"ingredient": _norm(ing["이름"]), "재료ID": ing["재료ID"], "unit": unit,
+                   "need": _num(a["need"]), "used_in": a["used_in"], "estimated": a["estimated"]}
             if len(a["units"]) > 1:
                 hold.append(ing["이름"])
                 row.update(have=stock["qty"] if stock else 0, short=None, status="hold",
@@ -153,11 +187,15 @@ class Kitchen:
             else:
                 short = max(a["need"] - _frac(stock["qty"]), Fraction(0))
                 row.update(have=stock["qty"], short=_num(short), status="short" if short > 0 else "ok", note="")
+            if a["estimated"]:
+                row["note"] = (row["note"] + " · " if row["note"] else "") + "AI 추정 수량 포함"
             if row["short"]:
-                shopping.append({"ingredient": ing["이름"], "amount": row["short"], "unit": unit})
+                shopping.append({"ingredient": row["ingredient"], "amount": row["short"], "unit": unit,
+                                 "estimated": a["estimated"]})
             rows.append(row)
         return {
             "dishes": dishes, "rows": rows, "shopping_list": shopping,
+            "has_estimates": any(d["source"] == "AI 추정" for d in dishes),
             "hold_ingredients": hold, "shopping_confirmed": not hold,
             "verdict": "부족" if shopping else ("보류" if hold else "가능"),
             "inventory_changed": False,
@@ -238,13 +276,22 @@ TOOLS = [
     {
         "name": "plan_shopping",
         "description": ("사용자가 먹고 싶은 메뉴(1개 이상)를 받아, 같은 재료를 합산한 재료별 필요 · 보유 · 부족과 "
-                        "장보기 목록을 코드로 계산한다. 메뉴가 여러 개일 때는 이 도구로 한 번에 계산한다. 재고는 바뀌지 않는다."),
+                        "장보기 목록을 코드로 계산한다. 메뉴가 여러 개일 때는 이 도구로 한 번에 계산한다. 재고는 바뀌지 않는다. "
+                        "등록 메뉴는 recipe_id로, 등록되지 않은 메뉴(예: 파스타)는 custom_name과 직접 추정한 ingredients로 넣는다. "
+                        "두 종류를 한 번의 호출에 섞어도 된다."),
         "input_schema": {"type": "object", "properties": {
             "items": {"type": "array", "description": "먹고 싶은 메뉴 목록", "items": {
                 "type": "object", "properties": {
-                    "recipe_id": {"type": "string", "description": "레시피ID(예: R01). 이름만 알면 이름도 가능."},
+                    "recipe_id": {"type": "string", "description": "등록 메뉴의 레시피ID(예: R01) 또는 이름. 등록 메뉴일 때만."},
+                    "custom_name": {"type": "string", "description": "등록되지 않은 메뉴 이름(예: 파스타). 이때 ingredients 필수."},
+                    "ingredients": {"type": "array", "description": ("custom_name 메뉴에 필요한 재료와 **요청 인원 전체 분량**의 "
+                                                                     "일반적인 수량 추정치. 단위는 g 또는 개로 환산(물, 기름, 소금 등도 g)."),
+                                    "items": {"type": "object", "properties": {
+                                        "name": {"type": "string"}, "qty": {"type": "number"},
+                                        "unit": {"type": "string", "enum": ["g", "개"]}},
+                                        "required": ["name", "qty", "unit"]}},
                     "servings": {"type": "integer", "description": "그 메뉴를 먹는 사람 수(1 이상)"}},
-                "required": ["recipe_id", "servings"]}}},
+                "required": ["servings"]}}},
             "required": ["items"]},
     },
 ]

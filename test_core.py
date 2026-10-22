@@ -81,9 +81,30 @@ assert sorted((s["ingredient"], s["amount"]) for s in plan["shopping_list"]) == 
 assert plan["verdict"] == "부족" and plan["shopping_confirmed"] and plan["inventory_changed"] is False
 # 같은 메뉴를 두 번 넣으면 합산, 재고 충분하면 장보기 없음
 dup = k.plan_shopping([{"recipe_id": "R01", "servings": 1}, {"recipe_id": "R01", "servings": 1}])
-assert {r["ingredient"]: r["need"] for r in dup["rows"]}["쌀"] == 200 and dup["shopping_list"] == [{"ingredient": "쌀", "amount": 50, "unit": "g"}]
+assert {r["ingredient"]: r["need"] for r in dup["rows"]}["쌀"] == 200 and dup["shopping_list"] == [{"ingredient": "쌀", "amount": 50, "unit": "g", "estimated": False}]
 ok = k.plan_shopping([{"recipe_id": "R02", "servings": 1}, {"recipe_id": "R03", "servings": 2}])
 assert ok["shopping_list"] == [] and ok["verdict"] == "가능"
+# 등록되지 않은 메뉴(AI 추정 재료량) + 등록 메뉴 합산: 비교 · 합산은 코드
+pasta = [{"name": "파스타면", "qty": 200, "unit": "g"}, {"name": "양파", "qty": 2, "unit": "개"},
+         {"name": "계란", "qty": 2, "unit": "개"}, {"name": "식용유", "qty": 20, "unit": "g"}]
+cp = k.plan_shopping([{"custom_name": "파스타", "servings": 2, "ingredients": pasta}, {"recipe_id": "R06", "servings": 2}])
+crow = {r["ingredient"]: (r["need"], r["have"], r["short"]) for r in cp["rows"]}
+assert crow["파스타면"] == (200, 0, 200), crow           # 냉장고에 없는 재료
+assert crow["양파"] == (3, 1, 2), crow                   # 파스타 2 + 양파달걀국 1 합산
+assert crow["달걀"] == (4, 4, 0), crow                   # 계란 -> 달걀 동의어 합산(2 + 2)
+assert cp["has_estimates"] and cp["dishes"][0]["source"] == "AI 추정" and cp["dishes"][1]["source"] == "등록 레시피"
+assert [r for r in cp["rows"] if r["ingredient"] == "파스타면"][0]["estimated"] is True
+assert [r for r in cp["rows"] if r["ingredient"] == "물"][0]["estimated"] is False
+for bad in ([{"custom_name": "파스타", "servings": 2}],                                   # 재료 없음
+            [{"custom_name": "파스타", "servings": 2, "ingredients": [{"name": "면", "qty": 200, "unit": "ml"}]}],
+            [{"custom_name": "파스타", "recipe_id": "R01", "servings": 2, "ingredients": pasta}],  # 둘 다
+            [{"servings": 2}]):                                                               # 둘 다 없음
+    try:
+        k.plan_shopping(bad)
+        raise AssertionError(f"AI 추정 입력 {bad!r} 허용됨")
+    except tools.ToolError:
+        pass
+
 # 단위 불일치 합산 보류
 holdp = tools.Kitchen(f2, recipes).plan_shopping([{"recipe_id": "R01", "servings": 1}, {"recipe_id": "R08", "servings": 1}])
 assert "쌀" in holdp["hold_ingredients"] and not holdp["shopping_confirmed"]

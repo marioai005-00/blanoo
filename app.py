@@ -126,8 +126,13 @@ def render_calc(c, label, entry_key):
 
 
 def render_plan(p, label):
-    dishes = " · ".join(f"{d['recipe_name']} {d['servings']}명" for d in p["dishes"])
+    dishes = " · ".join(f"{d['recipe_name']}{' (AI 추정)' if d.get('source') == 'AI 추정' else ''} {d['servings']}명"
+                        for d in p["dishes"])
     st.markdown(f"##### {label} — {dishes}")
+    for d in p["dishes"]:
+        if d.get("source") == "AI 추정":
+            with st.expander(f"AI가 추정한 '{d['recipe_name']}' 재료량 ({d['servings']}명 분량, 등록 레시피 아님)"):
+                st.table([{"재료": i["name"], "추정 수량": n(i["qty"], i["unit"])} for i in d["ingredients"]])
     st.table([{"재료": r["ingredient"],
                "필요(합산)": n(r["need"], r["unit"]),
                "보유": n(r["have"], r.get("fridge_unit", r["unit"])),
@@ -140,6 +145,9 @@ def render_plan(p, label):
         st.markdown("**추가로 필요한 재료가 없습니다.** 지금 재료로 모두 만들 수 있습니다.")
     if p["hold_ingredients"]:
         st.warning(f"단위가 달라 계산을 보류한 재료: {', '.join(p['hold_ingredients'])}. 장보기 목록을 확정할 수 없습니다.")
+    if p.get("has_estimates"):
+        st.info("'AI 추정' 메뉴의 재료량은 등록된 레시피가 아니라 AI가 일반적인 양으로 추정한 값입니다. "
+                "집마다 다를 수 있으니 참고용으로 보세요. 냉장고와의 비교 · 합산 계산은 코드가 했습니다.")
     st.caption("같은 재료는 메뉴 사이에서 합산해 비교했습니다. 현재 재고는 변경되지 않습니다.")
 
 
@@ -157,7 +165,8 @@ def render_cart(src):
     st.sidebar.caption(title)
     if result["shopping_list"]:
         for s in result["shopping_list"]:
-            st.sidebar.checkbox(f"{s['ingredient']} {n(s['amount'], s['unit'])}", key=f"buy_{key}_{s['ingredient']}")
+            est = " (AI 추정)" if s.get("estimated") else ""
+            st.sidebar.checkbox(f"{s['ingredient']} {n(s['amount'], s['unit'])}{est}", key=f"buy_{key}_{s['ingredient']}")
         buf = io.StringIO()
         w = csv.writer(buf)
         w.writerow(["재료", "부족량", "단위"])
