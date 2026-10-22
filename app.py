@@ -69,7 +69,18 @@ with st.sidebar.expander("설정 · 모의 시험"):
     st.caption("제한 시간을 아주 짧게 하거나 위 옵션을 켜면 실패 처리를 시험할 수 있습니다. "
                "이때 나는 실패는 기록에 '시험용 실패' · '모의 시험'으로 표시됩니다.")
 
-api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+def read_api_key():
+    """로컬은 .env(환경변수), 배포(Streamlit Cloud)는 Secrets에서 키를 읽는다. 값은 화면에 내지 않는다."""
+    key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        return str(st.secrets.get("ANTHROPIC_API_KEY", "")).strip()
+    except Exception:  # secrets 파일이 없는 로컬 실행
+        return ""
+
+
+api_key = read_api_key()
 
 
 # ---------------------------------------------------------------- 표시 도구
@@ -188,8 +199,10 @@ else:
 
 if not api_key:
     blocked = True
-    st.warning("Claude API 키가 설정되지 않았습니다. 프로젝트 폴더의 `.env` 파일에 `ANTHROPIC_API_KEY=...` 를 넣고 "
-               "이 페이지를 새로고침하세요. 키를 설정하기 전에는 질문을 보낼 수 없습니다.")
+    st.warning("Claude API 키가 설정되지 않았습니다. 내 컴퓨터에서 실행 중이면 프로젝트 폴더의 `.env` 파일에 "
+               "`ANTHROPIC_API_KEY=...` 를 넣고, Streamlit Cloud에 배포했다면 앱 설정의 Secrets에 "
+               "`ANTHROPIC_API_KEY = \"...\"` 를 저장한 뒤 이 페이지를 새로고침하세요. "
+               "키를 설정하기 전에는 질문을 보낼 수 없습니다.")
 
 # 재시도 / 후보 선택으로 들어온 요청
 pending = ss.pop("pending", None)
